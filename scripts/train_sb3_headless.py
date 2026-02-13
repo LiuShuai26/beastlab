@@ -4,7 +4,6 @@
 Usage:
     python scripts/train_sb3_headless.py HumanoidEnv
     python scripts/train_sb3_headless.py HumanoidEnv --timesteps 5000000
-    python scripts/train_sb3_headless.py HumanoidEnv --project path/to/Project.project
 """
 
 import argparse
@@ -18,13 +17,12 @@ from beastlab import make_beast_gym
 def main():
     parser = argparse.ArgumentParser(description="Train PPO on a headless Beast env")
     parser.add_argument("module", help="Module name (e.g. HumanoidEnv)")
-    parser.add_argument("--project", default=None, help="Path to .project file")
     parser.add_argument("--timesteps", type=int, default=10_000_000, help="Total training timesteps")
     parser.add_argument("--save", default="beast_ppo", help="Path to save the trained model")
     args = parser.parse_args()
 
-    env = make_beast_gym(args.module, project_path=args.project)
-    eval_env = make_beast_gym(args.module, project_path=args.project)
+    env = make_beast_gym(args.module)
+    eval_env = make_beast_gym(args.module)
 
     print(f"observation_space: {env.observation_space}")
     print(f"action_space: {env.action_space}")

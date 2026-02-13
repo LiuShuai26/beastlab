@@ -3,7 +3,6 @@
 Usage:
     python scripts/bench_env.py HumanoidEnv
     python scripts/bench_env.py HumanoidEnv --steps 10000
-    python scripts/bench_env.py HumanoidEnv --project path/to/Project.project
 """
 
 import argparse
@@ -14,10 +13,10 @@ import numpy as np
 from beastlab.env_loader import load_beast_env
 
 
-def bench(module_name, project_path=None, num_steps=5000):
+def bench(module_name, num_steps=5000):
     module = load_beast_env(module_name)
     EnvClass = getattr(module, module_name)
-    env = EnvClass(project_path) if project_path else EnvClass()
+    env = EnvClass()
 
     obs, info = env.reset()
     action_info = env.action_space()
@@ -47,10 +46,9 @@ def bench(module_name, project_path=None, num_steps=5000):
 def main():
     parser = argparse.ArgumentParser(description="Benchmark single-env FPS")
     parser.add_argument("module", help="Module name (e.g. HumanoidEnv)")
-    parser.add_argument("--project", default=None, help="Path to .project file")
     parser.add_argument("--steps", type=int, default=5000, help="Steps to benchmark (default: 5000)")
     args = parser.parse_args()
-    bench(args.module, project_path=args.project, num_steps=args.steps)
+    bench(args.module, num_steps=args.steps)
 
 
 if __name__ == "__main__":

@@ -59,9 +59,8 @@ class BeastGymWrapper(gym.Env):
         )
 
 
-def make_beast_gym(module_name: str, project_path=None):
+def make_beast_gym(module_name: str):
     """Load a .so env and return it wrapped as a Gymnasium env."""
     module = load_beast_env(module_name)
     EnvClass = getattr(module, module_name)
-    raw_env = EnvClass(project_path) if project_path else EnvClass()
-    return BeastGymWrapper(raw_env)
+    return BeastGymWrapper(EnvClass())

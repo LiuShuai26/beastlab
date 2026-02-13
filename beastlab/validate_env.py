@@ -5,7 +5,6 @@ it exposes the expected API and behaves correctly.
 
 Usage:
     python -m beastlab.validate_env HumanoidEnv
-    python -m beastlab.validate_env HumanoidEnv --project path/to/Project.project
     python -m beastlab.validate_env HumanoidEnv --steps 200
 """
 
@@ -27,7 +26,7 @@ def _check(name, passed, detail=""):
     return passed
 
 
-def validate(module_name, project_path=None, num_steps=100):
+def validate(module_name, num_steps=100):
     """Run validation checks on a Beast GameEnv .so module.
 
     Returns True if all checks pass, False otherwise.
@@ -55,10 +54,7 @@ def validate(module_name, project_path=None, num_steps=100):
         return False
 
     try:
-        if project_path:
-            env = EnvClass(project_path)
-        else:
-            env = EnvClass()
+        env = EnvClass()
         results.append(_check("instantiate env", True))
     except Exception as e:
         _check("instantiate env", False, str(e))
@@ -188,11 +184,10 @@ def validate(module_name, project_path=None, num_steps=100):
 def main():
     parser = argparse.ArgumentParser(description="Validate a Beast GameEnv .so module")
     parser.add_argument("module", help="Module name (e.g. HumanoidEnv)")
-    parser.add_argument("--project", default=None, help="Path to .project file (if required by env)")
     parser.add_argument("--steps", type=int, default=100, help="Number of random steps to run (default: 100)")
     args = parser.parse_args()
 
-    success = validate(args.module, project_path=args.project, num_steps=args.steps)
+    success = validate(args.module, num_steps=args.steps)
     sys.exit(0 if success else 1)
 
 
