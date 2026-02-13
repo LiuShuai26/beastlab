@@ -1,0 +1,23 @@
+
+.vscode/
+# Build artifacts
+envs/*.so
+*.egg-info/
+dist/
+build/
+
+# Python
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+
+# Training artifacts
+*.zip
+*.onnx
+*.pt
+
+# Projects (scene data)
+Projects/
+train_dir/

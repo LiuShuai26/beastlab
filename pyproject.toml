@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "beastlab"
+version = "0.1.0"
+description = "Python client for Beast editor ML training"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+train = ["stable-baselines3>=2.0", "gymnasium>=0.26"]
+sf = ["gymnasium>=0.26"]
+export = ["stable-baselines3>=2.0", "onnx>=1.14", "onnxruntime>=1.15", "onnxscript>=0.1"]
+
+[tool.setuptools.packages.find]
+include = ["beastlab*"]
