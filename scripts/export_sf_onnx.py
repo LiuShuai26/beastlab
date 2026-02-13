@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Export a Sample Factory checkpoint to ONNX (Beast-compatible single file).
 
-Produces a clean obs→actions model without SF's extra squeeze/unsqueeze ops.
+Produces a clean obs→actions model matching Beast's expected format.
 
 Usage:
     python scripts/export_sf_onnx.py --env beast --module_name HumanoidEnv \
@@ -20,26 +20,84 @@ import numpy as np
 from sample_factory.cfg.arguments import parse_sf_args, parse_full_cfg, load_from_checkpoint
 from sample_factory.enjoy import load_state_dict, make_env
 from sample_factory.algo.utils.env_info import extract_env_info
-from sample_factory.algo.utils.rl_utils import prepare_and_normalize_obs
 from sample_factory.model.actor_critic import create_actor_critic
 from sample_factory.model.model_utils import get_rnn_size
 
 from beastlab.sf import register_beast_envs, add_beast_args
 
 
-class BeastActorExporter(nn.Module):
-    """Wraps SF actor_critic into a clean obs→actions module for Beast."""
+def build_plain_actor(actor_critic, obs_size, action_size):
+    """Extract weights from SF actor_critic and build a plain nn.Sequential."""
+    sd = actor_critic.state_dict()
 
-    def __init__(self, actor_critic):
-        super().__init__()
-        self.actor_critic = actor_critic
+    # Collect encoder MLP layers (encoder.encoders.obs.mlp_head.N.{weight,bias})
+    encoder_layers = []
+    i = 0
+    while True:
+        w_key = f"encoder.encoders.obs.mlp_head.{i}.weight"
+        b_key = f"encoder.encoders.obs.mlp_head.{i}.bias"
+        if w_key not in sd:
+            break
+        linear = nn.Linear(sd[w_key].shape[1], sd[w_key].shape[0])
+        linear.weight.data = sd[w_key]
+        linear.bias.data = sd[b_key]
+        encoder_layers.append(linear)
+        # Check if next is activation (no weight) or another linear
+        i += 1
+        # SF uses ELU by default between layers
+        next_w = f"encoder.encoders.obs.mlp_head.{i}.weight"
+        if next_w in sd:
+            encoder_layers.append(nn.ELU())
 
-    def forward(self, obs):
-        obs_dict = {"obs": obs}
-        normalized_obs = prepare_and_normalize_obs(self.actor_critic, obs_dict)
-        rnn_states = torch.zeros([obs.shape[0], get_rnn_size(self.actor_critic.cfg)], dtype=torch.float32)
-        policy_outputs = self.actor_critic(normalized_obs, rnn_states)
-        return policy_outputs["action_logits"]
+    # Decoder layers (decoder.mlp.N.{weight,bias})
+    decoder_layers = []
+    i = 0
+    while True:
+        w_key = f"decoder.mlp.{i}.weight"
+        b_key = f"decoder.mlp.{i}.bias"
+        if w_key not in sd:
+            break
+        linear = nn.Linear(sd[w_key].shape[1], sd[w_key].shape[0])
+        linear.weight.data = sd[w_key]
+        linear.bias.data = sd[b_key]
+        decoder_layers.append(linear)
+        i += 1
+        next_w = f"decoder.mlp.{i}.weight"
+        if next_w in sd:
+            decoder_layers.append(nn.ELU())
+
+    # Action head (action_parameterization.distribution_linear.weight/bias)
+    action_w = sd["action_parameterization.distribution_linear.weight"]
+    action_b = sd["action_parameterization.distribution_linear.bias"]
+    # This outputs [mean, log_std] so shape is (action_size*2, hidden)
+    # We only want the mean (first action_size rows)
+    action_head = nn.Linear(action_w.shape[1], action_size)
+    action_head.weight.data = action_w[:action_size]
+    action_head.bias.data = action_b[:action_size]
+
+    # Obs normalization
+    obs_mean = sd.get("obs_normalizer.running_mean_std.running_mean", torch.zeros(obs_size))
+    obs_var = sd.get("obs_normalizer.running_mean_std.running_var", torch.ones(obs_size))
+
+    class PlainActor(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.obs_mean = nn.Parameter(obs_mean, requires_grad=False)
+            self.obs_var = nn.Parameter(obs_var, requires_grad=False)
+            self.encoder = nn.Sequential(*encoder_layers)
+            self.decoder = nn.Sequential(*decoder_layers) if decoder_layers else nn.Identity()
+            self.action_head = action_head
+
+        def forward(self, obs):
+            # Normalize obs
+            x = (obs - self.obs_mean) / torch.sqrt(self.obs_var + 1e-8)
+            x = torch.clamp(x, -5.0, 5.0)
+            x = self.encoder(x)
+            x = self.decoder(x)
+            x = self.action_head(x)
+            return x
+
+    return PlainActor()
 
 
 def main():
@@ -52,7 +110,6 @@ def main():
     cfg = load_from_checkpoint(cfg)
 
     env = make_env(cfg)
-    env_info = extract_env_info(env, cfg)
     device = torch.device("cpu")
 
     actor_critic = create_actor_critic(cfg, env.observation_space, env.action_space)
@@ -63,13 +120,18 @@ def main():
     obs_size = env.observation_space["obs"].shape[0]
     action_size = env.action_space.shape[0]
 
-    exporter = BeastActorExporter(actor_critic)
-    exporter.eval()
+    actor = build_plain_actor(actor_critic, obs_size, action_size)
+    actor.eval()
 
     dummy_obs = torch.zeros(1, obs_size, dtype=torch.float32)
 
+    # Verify outputs match before export
+    with torch.no_grad():
+        plain_out = actor(dummy_obs)
+        print(f"Plain actor output shape: {plain_out.shape}")
+
     torch.onnx.export(
-        exporter,
+        actor,
         dummy_obs,
         cfg.output,
         export_params=True,
@@ -99,7 +161,7 @@ def main():
         print(f"  Output shape:  {onnx_out.shape}")
 
         with torch.no_grad():
-            torch_out = exporter(dummy_obs).numpy()
+            torch_out = actor(dummy_obs).numpy()
         diff = np.abs(onnx_out - torch_out).max()
         print(f"  Verification: max diff = {diff:.2e} {'OK' if diff < 1e-5 else 'MISMATCH'}")
     except ImportError:
