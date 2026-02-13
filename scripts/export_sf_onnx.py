@@ -77,6 +77,7 @@ def main():
         output_names=["actions"],
         dynamic_axes={"obs": {0: "batch"}, "actions": {0: "batch"}},
         opset_version=17,
+        dynamo=False,
     )
 
     # Ensure single file
