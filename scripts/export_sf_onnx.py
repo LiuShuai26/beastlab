@@ -27,6 +27,12 @@ def main():
     cfg = parse_full_cfg(parser)
 
     status = export_onnx(cfg, cfg.output)
+
+    # Ensure single file (no external data)
+    import onnx
+    model = onnx.load(cfg.output)
+    onnx.save(model, cfg.output, save_as_external_data=False)
+
     print(f"Exported to {cfg.output}")
     return status
 
