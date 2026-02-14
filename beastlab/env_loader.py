@@ -48,7 +48,7 @@ class BeastGymWrapper(gym.Env):
         return np.asarray(obs, dtype=np.float32), info
 
     def step(self, action):
-        action = np.asarray(action, dtype=np.float32)
+        action = np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0)
         obs, rewards, terminated, truncated, info = self._env.step(action)
         return (
             np.asarray(obs, dtype=np.float32),
