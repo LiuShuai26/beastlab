@@ -21,3 +21,4 @@ __pycache__/
 # Projects (scene data)
 Projects/
 train_dir/
+runs/

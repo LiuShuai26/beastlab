@@ -95,6 +95,8 @@ class BeastClientEnv(_BaseClass):
         port: MLServer port (default: 5555).
         timeout: Socket timeout in seconds (default: 30).
         auto_connect: Whether to connect automatically on init (default: True).
+        joint_mapping: Optional dict mapping joint names to obs indices (sin/cos pairs).
+        key_body_mapping: Optional dict mapping key body names to obs indices (x/y pairs).
     """
 
     metadata = {"render_modes": ["human"], "render_fps": 60}
@@ -105,6 +107,8 @@ class BeastClientEnv(_BaseClass):
         port: int = 5555,
         timeout: float = 30.0,
         auto_connect: bool = True,
+        joint_mapping: Optional[Dict[str, int]] = None,
+        key_body_mapping: Optional[Dict[str, int]] = None,
     ):
         if _HAS_GYM and isinstance(self, gym.Env):
             super().__init__()
@@ -119,6 +123,10 @@ class BeastClientEnv(_BaseClass):
         self.observation_size: int = 0
         self.continuous_action_size: int = 0
         self.discrete_branches: List[int] = []
+
+        # Project-specific mappings (injected into info dicts)
+        self.joint_mapping: Dict[str, int] = joint_mapping or {}
+        self.key_body_mapping: Dict[str, int] = key_body_mapping or {}
 
         # Spaces (set after connect)
         self.observation_space = None
@@ -340,7 +348,21 @@ class BeastClientEnv(_BaseClass):
         offset += 1
         truncated = np.array([payload[offset] != 0], dtype=bool)
 
-        return obs, rewards, terminated, truncated, {}
+        info = {}
+        if self.joint_mapping:
+            # joint_mapping maps name -> obs index of sin value (cos is at index+1)
+            info["joint_mapping"] = {
+                name: float(np.arctan2(obs[idx], obs[idx + 1]))
+                for name, idx in self.joint_mapping.items()
+            }
+        if self.key_body_mapping:
+            # key_body_mapping maps name -> obs index of x (y is at index+1)
+            kbp = {}
+            for name, idx in self.key_body_mapping.items():
+                kbp[f"{name}_x"] = float(obs[idx])
+                kbp[f"{name}_y"] = float(obs[idx + 1])
+            info["key_body_positions"] = kbp
+        return obs, rewards, terminated, truncated, info
 
     def _send(self, msg_type: int, payload: bytes = b''):
         """Send a message with header."""
@@ -393,17 +415,22 @@ class BeastClientEnv(_BaseClass):
 def make_beast_env(
     host: str = "127.0.0.1",
     port: int = 5555,
+    joint_mapping: Optional[Dict[str, int]] = None,
+    key_body_mapping: Optional[Dict[str, int]] = None,
 ) -> BeastClientEnv:
     """Create a Beast environment.
 
     Args:
         host: MLServer host.
         port: MLServer port.
+        joint_mapping: Optional dict mapping joint names to obs indices (sin/cos pairs).
+        key_body_mapping: Optional dict mapping key body names to obs indices (x/y pairs).
 
     Returns:
         BeastClientEnv instance.
     """
-    return BeastClientEnv(host=host, port=port)
+    return BeastClientEnv(host=host, port=port, joint_mapping=joint_mapping,
+                          key_body_mapping=key_body_mapping)
 
 
 # ---------------------------------------------------------------------------
