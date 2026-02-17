@@ -1,4 +1,4 @@
-# CleanRL PPO with keyframe cycle tracking.
+# CleanRL PPO with multi-critic per-group reward normalization.
 # Based on: https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_continuous_actionpy
 import atexit
 import os
@@ -79,6 +79,14 @@ class Args:
     """the maximum norm for the gradient clipping"""
     target_kl: float = None
     """the target KL divergence threshold"""
+    lcp_coef: float = 1.0
+    """coefficient for Lipschitz constraint penalty (gradient penalty on actor)"""
+
+    # Multi-critic
+    num_reward_groups: int = 3
+    """number of independent reward groups (critics)"""
+    reward_weights: str = "2.0,1.0,0.5"
+    """comma-separated weights for combining per-group normalized advantages"""
 
     # Editor training
     editor: bool = False
@@ -115,8 +123,7 @@ def make_env(
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = gym.wrappers.NormalizeObservation(env)
         env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10))
-        env = gym.wrappers.NormalizeReward(env, gamma=gamma)
-        env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
+        # No NormalizeReward/TransformReward — per-group advantage normalization replaces them
         return env
 
     return thunk
@@ -143,17 +150,24 @@ class NormalizedActor(nn.Module):
 
 
 class Agent(nn.Module):
-    def __init__(self, envs):
+    def __init__(self, envs, num_reward_groups=3):
         super().__init__()
         obs_dim = np.array(envs.single_observation_space.shape).prod()
         act_dim = np.prod(envs.single_action_space.shape)
-        self.critic = nn.Sequential(
-            layer_init(nn.Linear(obs_dim, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 1), std=1.0),
-        )
+        self.num_reward_groups = num_reward_groups
+
+        # One critic per reward group
+        self.critics = nn.ModuleList([
+            nn.Sequential(
+                layer_init(nn.Linear(obs_dim, 64)),
+                nn.Tanh(),
+                layer_init(nn.Linear(64, 64)),
+                nn.Tanh(),
+                layer_init(nn.Linear(64, 1), std=1.0),
+            )
+            for _ in range(num_reward_groups)
+        ])
+
         self.actor_mean = nn.Sequential(
             layer_init(nn.Linear(obs_dim, 64)),
             nn.Tanh(),
@@ -163,10 +177,11 @@ class Agent(nn.Module):
         )
         self.actor_logstd = nn.Parameter(torch.zeros(1, act_dim))
 
-    def get_value(self, x):
-        return self.critic(x)
+    def get_values(self, x):
+        """Returns (B, G) tensor of per-group values."""
+        return torch.cat([c(x) for c in self.critics], dim=-1)
 
-    def get_action_and_value(self, x, action=None):
+    def get_action_and_values(self, x, action=None):
         action_mean = self.actor_mean(x)
         action_std = torch.exp(self.actor_logstd.expand_as(action_mean))
         probs = Normal(action_mean, action_std)
@@ -176,12 +191,17 @@ class Agent(nn.Module):
             action,
             probs.log_prob(action).sum(1),
             probs.entropy().sum(1),
-            self.critic(x),
+            self.get_values(x),  # (B, G)
         )
 
 
 if __name__ == "__main__":
     args = tyro.cli(Args)
+
+    # Parse reward weights
+    reward_weights = [float(w) for w in args.reward_weights.split(",")]
+    G = args.num_reward_groups
+    assert len(reward_weights) == G, f"reward_weights length {len(reward_weights)} != num_reward_groups {G}"
 
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
@@ -215,6 +235,7 @@ if __name__ == "__main__":
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    reward_weights_t = torch.tensor(reward_weights, dtype=torch.float32, device=device)
 
     # Environment setup
     envs = gym.vector.SyncVectorEnv(
@@ -235,7 +256,7 @@ if __name__ == "__main__":
         envs.single_action_space, gym.spaces.Box
     ), "only continuous action space is supported"
 
-    agent = Agent(envs).to(device)
+    agent = Agent(envs, num_reward_groups=G).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # Save function — called on normal exit, Ctrl+C, or SIGTERM
@@ -298,8 +319,9 @@ if __name__ == "__main__":
     ).to(device)
     logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
     rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
+    rewards_g = torch.zeros((args.num_steps, args.num_envs, G)).to(device)
     dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
-    values = torch.zeros((args.num_steps, args.num_envs)).to(device)
+    values_g = torch.zeros((args.num_steps, args.num_envs, G)).to(device)
 
     # Start
     global_step = 0
@@ -319,8 +341,8 @@ if __name__ == "__main__":
             dones[step] = next_done
 
             with torch.no_grad():
-                action, logprob, _, value = agent.get_action_and_value(next_obs)
-                values[step] = value.flatten()
+                action, logprob, _, vals_g = agent.get_action_and_values(next_obs)
+                values_g[step] = vals_g  # (E, G)
             actions[step] = action
             logprobs[step] = logprob
 
@@ -329,6 +351,26 @@ if __name__ == "__main__":
             )
             next_done = np.logical_or(terminations, truncations)
             rewards[step] = torch.tensor(reward).to(device).view(-1)
+
+            # Extract per-group rewards from info
+            # SyncVectorEnv stacks per-env info values; reward_groups may be
+            # an object-dtype array of per-env arrays, a 2D float array, or a 1D array (single env).
+            if "reward_groups" in infos:
+                rg_raw = infos["reward_groups"]
+                for ei in range(args.num_envs):
+                    if isinstance(rg_raw, np.ndarray) and rg_raw.dtype == object:
+                        rg = np.asarray(rg_raw[ei], dtype=np.float32)
+                    elif isinstance(rg_raw, np.ndarray) and rg_raw.ndim == 2:
+                        rg = rg_raw[ei]
+                    elif isinstance(rg_raw, np.ndarray) and rg_raw.ndim == 1:
+                        rg = rg_raw
+                    else:
+                        rg = np.asarray(rg_raw, dtype=np.float32)
+                    rewards_g[step, ei] = torch.from_numpy(rg[:G].astype(np.float32)).to(device)
+            else:
+                for ei in range(args.num_envs):
+                    rewards_g[step, ei, 0] = reward[ei] if hasattr(reward, '__getitem__') else reward
+
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(
                 next_done
             ).to(device)
@@ -346,33 +388,45 @@ if __name__ == "__main__":
                             "charts/episodic_length", info["episode"]["l"], global_step
                         )
 
-        # Bootstrap value if not done
+        # Per-group GAE
         with torch.no_grad():
-            next_value = agent.get_value(next_obs).reshape(1, -1)
-            advantages = torch.zeros_like(rewards).to(device)
-            lastgaelam = 0
-            for t in reversed(range(args.num_steps)):
-                if t == args.num_steps - 1:
-                    nextnonterminal = 1.0 - next_done
-                    nextvalues = next_value
-                else:
-                    nextnonterminal = 1.0 - dones[t + 1]
-                    nextvalues = values[t + 1]
-                delta = (
-                    rewards[t] + args.gamma * nextvalues * nextnonterminal - values[t]
-                )
-                advantages[t] = lastgaelam = (
-                    delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
-                )
-            returns = advantages + values
+            next_values_g = agent.get_values(next_obs)  # (E, G)
+            advantages_g = torch.zeros_like(rewards_g).to(device)  # (T, E, G)
+
+            for g in range(G):
+                lastgaelam = 0
+                for t in reversed(range(args.num_steps)):
+                    if t == args.num_steps - 1:
+                        nextnonterminal = 1.0 - next_done
+                        nextvalues = next_values_g[:, g]
+                    else:
+                        nextnonterminal = 1.0 - dones[t + 1]
+                        nextvalues = values_g[t + 1, :, g]
+                    delta = (
+                        rewards_g[t, :, g]
+                        + args.gamma * nextvalues * nextnonterminal
+                        - values_g[t, :, g]
+                    )
+                    advantages_g[t, :, g] = lastgaelam = (
+                        delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
+                    )
+
+            returns_g = advantages_g + values_g  # (T, E, G)
+
+            # Combine: normalize each group, weighted sum
+            combined_advantages = torch.zeros(args.num_steps, args.num_envs, device=device)
+            for g in range(G):
+                ag = advantages_g[:, :, g]
+                ag_norm = (ag - ag.mean()) / (ag.std() + 1e-8)
+                combined_advantages += reward_weights_t[g] * ag_norm
 
         # Flatten the batch
         b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
         b_logprobs = logprobs.reshape(-1)
         b_actions = actions.reshape((-1,) + envs.single_action_space.shape)
-        b_advantages = advantages.reshape(-1)
-        b_returns = returns.reshape(-1)
-        b_values = values.reshape(-1)
+        b_advantages = combined_advantages.reshape(-1)
+        b_returns_g = returns_g.reshape(-1, G)
+        b_values_g = values_g.reshape(-1, G)
 
         # Optimize policy and value network
         b_inds = np.arange(args.batch_size)
@@ -382,7 +436,7 @@ if __name__ == "__main__":
             for start in range(0, args.batch_size, args.minibatch_size):
                 mb_inds = b_inds[start : start + args.minibatch_size]
 
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(
+                _, newlogprob, entropy, newvalues_g = agent.get_action_and_values(
                     b_obs[mb_inds], b_actions[mb_inds]
                 )
                 logratio = newlogprob - b_logprobs[mb_inds]
@@ -395,11 +449,8 @@ if __name__ == "__main__":
                         ((ratio - 1.0).abs() > args.clip_coef).float().mean().item()
                     ]
 
+                # Advantages are already per-group normalized, skip norm_adv
                 mb_advantages = b_advantages[mb_inds]
-                if args.norm_adv:
-                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (
-                        mb_advantages.std() + 1e-8
-                    )
 
                 # Policy loss
                 pg_loss1 = -mb_advantages * ratio
@@ -408,24 +459,36 @@ if __name__ == "__main__":
                 )
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
-                # Value loss
-                newvalue = newvalue.view(-1)
-                if args.clip_vloss:
-                    v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
-                    v_clipped = b_values[mb_inds] + torch.clamp(
-                        newvalue - b_values[mb_inds], -args.clip_coef, args.clip_coef
-                    )
-                    v_loss = (
-                        0.5
-                        * torch.max(
-                            v_loss_unclipped, (v_clipped - b_returns[mb_inds]) ** 2
-                        ).mean()
-                    )
-                else:
-                    v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
+                # Value loss: sum of per-group MSE losses
+                v_loss = 0.0
+                for g in range(G):
+                    nv = newvalues_g[:, g]
+                    if args.clip_vloss:
+                        v_loss_unclipped = (nv - b_returns_g[mb_inds, g]) ** 2
+                        v_clipped = b_values_g[mb_inds, g] + torch.clamp(
+                            nv - b_values_g[mb_inds, g], -args.clip_coef, args.clip_coef
+                        )
+                        v_loss += (
+                            0.5
+                            * torch.max(
+                                v_loss_unclipped, (v_clipped - b_returns_g[mb_inds, g]) ** 2
+                            ).mean()
+                        )
+                    else:
+                        v_loss += 0.5 * ((nv - b_returns_g[mb_inds, g]) ** 2).mean()
 
                 entropy_loss = entropy.mean()
                 loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
+
+                # LCP: Lipschitz constraint penalty on actor
+                if args.lcp_coef > 0:
+                    mb_obs_grad = b_obs[mb_inds].detach().requires_grad_(True)
+                    action_mean = agent.actor_mean(mb_obs_grad)
+                    grad = torch.autograd.grad(
+                        action_mean.sum(), mb_obs_grad, create_graph=True
+                    )[0]
+                    grad_penalty = grad.norm(2, dim=-1).mean()
+                    loss = loss + args.lcp_coef * grad_penalty
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -435,20 +498,31 @@ if __name__ == "__main__":
             if args.target_kl is not None and approx_kl > args.target_kl:
                 break
 
-        y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
-        var_y = np.var(y_true)
-        explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
+        # Logging
+        # Per-group value explained variance
+        for g in range(G):
+            y_pred = b_values_g[:, g].cpu().numpy()
+            y_true = b_returns_g[:, g].cpu().numpy()
+            var_y = np.var(y_true)
+            ev = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
+            writer.add_scalar(f"losses/explained_variance_g{g}", ev, global_step)
+            writer.add_scalar(
+                f"charts/mean_reward_g{g}",
+                rewards_g[:, :, g].mean().item(),
+                global_step,
+            )
 
         writer.add_scalar(
             "charts/learning_rate", optimizer.param_groups[0]["lr"], global_step
         )
-        writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
+        writer.add_scalar("losses/value_loss", v_loss.item() if isinstance(v_loss, torch.Tensor) else v_loss, global_step)
         writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
         writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
         writer.add_scalar("losses/old_approx_kl", old_approx_kl.item(), global_step)
         writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
-        writer.add_scalar("losses/explained_variance", explained_var, global_step)
+        if args.lcp_coef > 0:
+            writer.add_scalar("losses/grad_penalty", grad_penalty.item(), global_step)
         print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar(
             "charts/SPS", int(global_step / (time.time() - start_time)), global_step

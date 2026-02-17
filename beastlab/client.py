@@ -123,6 +123,7 @@ class BeastClientEnv(_BaseClass):
         self.observation_size: int = 0
         self.continuous_action_size: int = 0
         self.discrete_branches: List[int] = []
+        self.num_reward_groups: int = 1
 
         # Project-specific mappings (injected into info dicts)
         self.joint_mapping: Dict[str, int] = joint_mapping or {}
@@ -166,6 +167,8 @@ class BeastClientEnv(_BaseClass):
             print(f"  Continuous actions: {self.continuous_action_size}")
             if self.discrete_branches:
                 print(f"  Discrete branches: {self.discrete_branches}")
+            if self.num_reward_groups > 1:
+                print(f"  Reward groups: {self.num_reward_groups}")
 
             return True
 
@@ -184,6 +187,11 @@ class BeastClientEnv(_BaseClass):
         for _ in range(num_branches):
             bs = struct.unpack_from('<i', payload, offset)[0]; offset += 4
             self.discrete_branches.append(bs)
+        # numRewardGroups appended after branchSizes (backward-compatible: default 1)
+        if offset < len(payload):
+            self.num_reward_groups = struct.unpack_from('<i', payload, offset)[0]; offset += 4
+        else:
+            self.num_reward_groups = 1
 
     def _setup_spaces(self):
         """Set up gymnasium observation and action spaces from config."""
@@ -335,28 +343,32 @@ class BeastClientEnv(_BaseClass):
     def _parse_step_result(self, payload: bytes):
         """Parse StepResult payload into numpy arrays."""
         obs_size = self.observation_size
-        # single agent: obs (float32 * obs_size) + reward (float32) + terminated (u8) + truncated (u8)
+        nrg = self.num_reward_groups
         offset = 0
 
         obs = np.frombuffer(payload, dtype=np.float32, count=obs_size, offset=offset).copy()
         offset += obs_size * 4
 
-        rewards = np.array([struct.unpack_from('<f', payload, offset)[0]], dtype=np.float32)
-        offset += 4
+        # Read N reward group floats
+        reward_groups = np.frombuffer(payload, dtype=np.float32, count=nrg, offset=offset).copy()
+        offset += nrg * 4
+
+        # Scalar reward = sum of all groups (gym-compatible)
+        rewards = np.array([reward_groups.sum()], dtype=np.float32)
 
         terminated = np.array([payload[offset] != 0], dtype=bool)
         offset += 1
         truncated = np.array([payload[offset] != 0], dtype=bool)
 
         info = {}
+        if nrg > 1:
+            info["reward_groups"] = reward_groups
         if self.joint_mapping:
-            # joint_mapping maps name -> obs index of sin value (cos is at index+1)
             info["joint_mapping"] = {
                 name: float(np.arctan2(obs[idx], obs[idx + 1]))
                 for name, idx in self.joint_mapping.items()
             }
         if self.key_body_mapping:
-            # key_body_mapping maps name -> obs index of x (y is at index+1)
             kbp = {}
             for name, idx in self.key_body_mapping.items():
                 kbp[f"{name}_x"] = float(obs[idx])

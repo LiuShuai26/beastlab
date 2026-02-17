@@ -74,6 +74,8 @@ class Args:
     """the maximum norm for the gradient clipping"""
     target_kl: float = None
     """the target KL divergence threshold"""
+    lcp_coef: float = 0.0
+    """coefficient for Lipschitz constraint penalty (gradient penalty on actor)"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -299,6 +301,14 @@ if __name__ == "__main__":
                 entropy_loss = entropy.mean()
                 loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
 
+                # LCP: Lipschitz constraint penalty on actor
+                if args.lcp_coef > 0:
+                    mb_obs_grad = b_obs[mb_inds].detach().requires_grad_(True)
+                    action_mean = agent.actor_mean(mb_obs_grad)
+                    grad = torch.autograd.grad(action_mean.sum(), mb_obs_grad, create_graph=True)[0]
+                    grad_penalty = grad.norm(2, dim=-1).mean()
+                    loss = loss + args.lcp_coef * grad_penalty
+
                 optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
@@ -319,6 +329,8 @@ if __name__ == "__main__":
         writer.add_scalar("losses/old_approx_kl", old_approx_kl.item(), global_step)
         writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
+        if args.lcp_coef > 0:
+            writer.add_scalar("losses/grad_penalty", grad_penalty.item(), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
         print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
