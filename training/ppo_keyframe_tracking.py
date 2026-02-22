@@ -71,7 +71,7 @@ class Args:
     """the surrogate clipping coefficient"""
     clip_vloss: bool = True
     """Toggles whether or not to use a clipped loss for the value function"""
-    ent_coef: float = 0.0001
+    ent_coef: float = 0.001
     """coefficient of the entropy"""
     vf_coef: float = 0.5
     """coefficient of the value function"""
@@ -85,7 +85,7 @@ class Args:
     # Multi-critic
     num_reward_groups: int = 3
     """number of independent reward groups (critics)"""
-    reward_weights: str = "2.0,1.0,0.5"
+    reward_weights: str = "2.0,0.1,0.5"
     """comma-separated weights for combining per-group normalized advantages"""
 
     # Editor training
@@ -157,16 +157,18 @@ class Agent(nn.Module):
         self.num_reward_groups = num_reward_groups
 
         # One critic per reward group
-        self.critics = nn.ModuleList([
-            nn.Sequential(
-                layer_init(nn.Linear(obs_dim, 64)),
-                nn.Tanh(),
-                layer_init(nn.Linear(64, 64)),
-                nn.Tanh(),
-                layer_init(nn.Linear(64, 1), std=1.0),
-            )
-            for _ in range(num_reward_groups)
-        ])
+        self.critics = nn.ModuleList(
+            [
+                nn.Sequential(
+                    layer_init(nn.Linear(obs_dim, 64)),
+                    nn.Tanh(),
+                    layer_init(nn.Linear(64, 64)),
+                    nn.Tanh(),
+                    layer_init(nn.Linear(64, 1), std=1.0),
+                )
+                for _ in range(num_reward_groups)
+            ]
+        )
 
         self.actor_mean = nn.Sequential(
             layer_init(nn.Linear(obs_dim, 64)),
@@ -201,7 +203,9 @@ if __name__ == "__main__":
     # Parse reward weights
     reward_weights = [float(w) for w in args.reward_weights.split(",")]
     G = args.num_reward_groups
-    assert len(reward_weights) == G, f"reward_weights length {len(reward_weights)} != num_reward_groups {G}"
+    assert (
+        len(reward_weights) == G
+    ), f"reward_weights length {len(reward_weights)} != num_reward_groups {G}"
 
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
@@ -366,10 +370,14 @@ if __name__ == "__main__":
                         rg = rg_raw
                     else:
                         rg = np.asarray(rg_raw, dtype=np.float32)
-                    rewards_g[step, ei] = torch.from_numpy(rg[:G].astype(np.float32)).to(device)
+                    rewards_g[step, ei] = torch.from_numpy(
+                        rg[:G].astype(np.float32)
+                    ).to(device)
             else:
                 for ei in range(args.num_envs):
-                    rewards_g[step, ei, 0] = reward[ei] if hasattr(reward, '__getitem__') else reward
+                    rewards_g[step, ei, 0] = (
+                        reward[ei] if hasattr(reward, "__getitem__") else reward
+                    )
 
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(
                 next_done
@@ -408,13 +416,16 @@ if __name__ == "__main__":
                         - values_g[t, :, g]
                     )
                     advantages_g[t, :, g] = lastgaelam = (
-                        delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
+                        delta
+                        + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
                     )
 
             returns_g = advantages_g + values_g  # (T, E, G)
 
             # Combine: normalize each group, weighted sum
-            combined_advantages = torch.zeros(args.num_steps, args.num_envs, device=device)
+            combined_advantages = torch.zeros(
+                args.num_steps, args.num_envs, device=device
+            )
             for g in range(G):
                 ag = advantages_g[:, :, g]
                 ag_norm = (ag - ag.mean()) / (ag.std() + 1e-8)
@@ -471,7 +482,8 @@ if __name__ == "__main__":
                         v_loss += (
                             0.5
                             * torch.max(
-                                v_loss_unclipped, (v_clipped - b_returns_g[mb_inds, g]) ** 2
+                                v_loss_unclipped,
+                                (v_clipped - b_returns_g[mb_inds, g]) ** 2,
                             ).mean()
                         )
                     else:
@@ -515,7 +527,11 @@ if __name__ == "__main__":
         writer.add_scalar(
             "charts/learning_rate", optimizer.param_groups[0]["lr"], global_step
         )
-        writer.add_scalar("losses/value_loss", v_loss.item() if isinstance(v_loss, torch.Tensor) else v_loss, global_step)
+        writer.add_scalar(
+            "losses/value_loss",
+            v_loss.item() if isinstance(v_loss, torch.Tensor) else v_loss,
+            global_step,
+        )
         writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
         writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
         writer.add_scalar("losses/old_approx_kl", old_approx_kl.item(), global_step)

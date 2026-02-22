@@ -20,5 +20,6 @@ __pycache__/
 
 # Projects (scene data)
 Projects/
+keyframe/
 train_dir/
 runs/
