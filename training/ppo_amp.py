@@ -157,11 +157,11 @@ class Args:
     """gym env id, or Beast .so module name"""
     total_timesteps: int = 10000000
     """total timesteps of the experiments"""
-    learning_rate: float = 3e-4
+    learning_rate: float = 1e-4
     """the learning rate of the optimizer"""
-    num_envs: int = 1
+    num_envs: int = 16
     """the number of parallel game environments"""
-    num_steps: int = 2048
+    num_steps: int = 512
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = False
     """Toggle learning rate annealing for policy and value networks"""
@@ -169,9 +169,9 @@ class Args:
     """the discount factor gamma"""
     gae_lambda: float = 0.95
     """the lambda for the general advantage estimation"""
-    num_minibatches: int = 32
+    num_minibatches: int = 512
     """the number of mini-batches"""
-    update_epochs: int = 4
+    update_epochs: int = 2
     """the K epochs to update the policy"""
     norm_adv: bool = True
     """Toggles advantages normalization"""
@@ -179,11 +179,11 @@ class Args:
     """the surrogate clipping coefficient"""
     clip_vloss: bool = True
     """Toggles whether or not to use a clipped loss for the value function"""
-    ent_coef: float = 0.0001
+    ent_coef: float = 0.001
     """coefficient of the entropy"""
     vf_coef: float = 0.5
     """coefficient of the value function"""
-    max_grad_norm: float = 0.7
+    max_grad_norm: float = 1.0
     """the maximum norm for the gradient clipping"""
     target_kl: float = None
     """the target KL divergence threshold"""
@@ -205,7 +205,7 @@ class Args:
     """gradient penalty coefficient for discriminator"""
     disc_weight_decay: float = 1e-4
     """discriminator optimizer weight decay"""
-    disc_update_epochs: int = 2
+    disc_update_epochs: int = 1
     """number of discriminator update epochs per PPO iteration"""
     task_reward_weight: float = 0.1
     """weight for task reward group in advantage combination"""
