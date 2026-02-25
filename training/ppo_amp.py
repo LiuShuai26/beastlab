@@ -151,11 +151,13 @@ class Args:
     """whether to capture videos of the agent performances"""
     save_model: bool = True
     """whether to save model into the `runs/{run_name}` folder"""
+    resume: str = ""
+    """path to a run directory to resume from (loads agent + discriminator checkpoints)"""
 
     # Algorithm specific arguments
     env_id: str = "HumanoidEnv"
     """gym env id, or Beast .so module name"""
-    total_timesteps: int = 10000000
+    total_timesteps: int = 50000000
     """total timesteps of the experiments"""
     learning_rate: float = 1e-4
     """the learning rate of the optimizer"""
@@ -169,7 +171,7 @@ class Args:
     """the discount factor gamma"""
     gae_lambda: float = 0.95
     """the lambda for the general advantage estimation"""
-    num_minibatches: int = 512
+    num_minibatches: int = 16
     """the number of mini-batches"""
     update_epochs: int = 2
     """the K epochs to update the policy"""
@@ -187,7 +189,7 @@ class Args:
     """the maximum norm for the gradient clipping"""
     target_kl: float = None
     """the target KL divergence threshold"""
-    lcp_coef: float = 0.0
+    lcp_coef: float = 1.0
     """coefficient for Lipschitz constraint penalty (gradient penalty on actor)"""
     hidden_dim: int = 256
     """hidden layer size for actor and critic networks"""
@@ -434,6 +436,24 @@ if __name__ == "__main__":
         lr=args.disc_lr,
         weight_decay=args.disc_weight_decay,
     )
+
+    # ------------------------------------------------------------------
+    # Resume from checkpoint
+    # ------------------------------------------------------------------
+    if args.resume:
+        resume_dir = args.resume
+        agent_path = os.path.join(resume_dir, f"{args.exp_name}.cleanrl_model")
+        disc_path = os.path.join(resume_dir, f"{args.exp_name}.disc_model")
+        if os.path.exists(agent_path):
+            agent.load_state_dict(torch.load(agent_path, map_location=device))
+            print(f"Resumed agent from {agent_path}")
+        else:
+            print(f"WARNING: agent checkpoint not found at {agent_path}")
+        if os.path.exists(disc_path):
+            discriminator.load_state_dict(torch.load(disc_path, map_location=device))
+            print(f"Resumed discriminator from {disc_path}")
+        else:
+            print(f"WARNING: discriminator checkpoint not found at {disc_path}")
 
     # ------------------------------------------------------------------
     # Checkpoint saving (on exit / Ctrl-C / SIGTERM)
