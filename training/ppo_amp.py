@@ -220,6 +220,18 @@ class Args:
     editor_port: int = 5555
     """Beast editor MLServer port"""
 
+    # Perturbation (robustness fine-tuning)
+    perturbation: bool = False
+    """enable random force perturbations during training"""
+    perturb_min_impulse: float = 1.0
+    """minimum perturbation impulse magnitude"""
+    perturb_max_impulse: float = 5.0
+    """maximum perturbation impulse magnitude"""
+    perturb_min_interval: int = 60
+    """minimum steps between perturbations"""
+    perturb_max_interval: int = 180
+    """maximum steps between perturbations"""
+
     # Computed at runtime
     batch_size: int = 0
     """the batch size (computed in runtime)"""
@@ -418,6 +430,25 @@ if __name__ == "__main__":
     assert isinstance(
         envs.single_action_space, gym.spaces.Box
     ), "only continuous action space is supported"
+
+    # Configure perturbations (static settings on Brain, works with headless .so)
+    if args.perturbation:
+        def _get_raw_env(env):
+            while hasattr(env, "env"):
+                env = env.env
+            if hasattr(env, "_env"):
+                return env._env
+            return env
+
+        raw = _get_raw_env(envs.envs[0])
+        if hasattr(raw, "set_perturbation_enabled"):
+            raw.set_perturbation_enabled(True)
+            raw.set_perturbation_strength(args.perturb_min_impulse, args.perturb_max_impulse)
+            raw.set_perturbation_interval(args.perturb_min_interval, args.perturb_max_interval)
+            print(f"Perturbations enabled: impulse=[{args.perturb_min_impulse}, {args.perturb_max_impulse}], "
+                  f"interval=[{args.perturb_min_interval}, {args.perturb_max_interval}] steps")
+        else:
+            print("WARNING: perturbation requested but env does not support set_perturbation_enabled (editor mode)")
 
     # ------------------------------------------------------------------
     # Networks + optimisers
