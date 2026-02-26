@@ -5,13 +5,16 @@ Loads keyframe JSON files and provides random sampling of (s_t, s_{t+1})
 transition pairs for discriminator training.
 
 Per-frame AMP state features (matching Brain.cpp observation layout):
-    [pelvis_y, joint_sin_cos(24), body_pos_pelvis_frame(10)] = 35 dims
+    [pelvis_y, joint_sin_cos(24), body_pos_pelvis_frame(10), phase(1)] = 36 dims
 
 - Joints are stored as sin/cos pairs (not raw angles) to match the raw
   observation format and avoid lossy atan2 roundtrips.
 - Body positions are rotated into the pelvis local frame using the same
   transform as Brain.cpp:  dx*cos(-a) - dy*sin(-a), dx*sin(-a) + dy*cos(-a).
 - pelvis_x is excluded (horizontal translation invariance).
+- Phase is a scalar in [0,1] indicating position within the clip.
+  Cyclic clips: phase = frame_idx / num_frames (wraps).
+  Aperiodic clips: phase = frame_idx / (num_frames - 1) (clamped).
 """
 
 import json
@@ -38,8 +41,8 @@ class AMPMotionBuffer:
         device:         Torch device for pre-computed tensors.
 
     Attributes:
-        obs_dim:        Dimensionality of a single-frame AMP state (35).
-        transition_dim: Dimensionality of a transition pair (70).
+        obs_dim:        Dimensionality of a single-frame AMP state (36).
+        transition_dim: Dimensionality of a transition pair (72).
     """
 
     def __init__(
@@ -57,29 +60,49 @@ class AMPMotionBuffer:
         self.body_order = list(body_order)
         self.num_joints = len(self.joint_order)
         self.num_bodies = len(self.body_order)
-        # 1 (pelvis_y) + num_joints*2 (sin/cos) + num_bodies*2 (x/y)
-        self.obs_dim = 1 + self.num_joints * 2 + self.num_bodies * 2
+        # 1 (pelvis_y) + num_joints*2 (sin/cos) + num_bodies*2 (x/y) + 1 (phase)
+        self.obs_dim = 1 + self.num_joints * 2 + self.num_bodies * 2 + 1
         self.transition_dim = self.obs_dim * 2
 
         clips = []  # list of (F, obs_dim) arrays, one per file
+        clip_cyclic = []  # whether each clip is cyclic
 
         for kf_file in keyframe_files:
             with open(kf_file) as f:
                 data = json.load(f)
             keyframes = data["keyframes"]
+            is_cyclic = data.get("is_cyclic", True)
+            clip_cyclic.append(is_cyclic)
 
-            clip = np.zeros((len(keyframes), self.obs_dim), dtype=np.float32)
+            num_frames = len(keyframes)
+            clip = np.zeros((num_frames, self.obs_dim), dtype=np.float32)
             for i, kf in enumerate(keyframes):
-                clip[i] = self._keyframe_to_amp(kf)
+                base_feat = self._keyframe_to_amp(kf)
+                # Compute phase for this frame
+                if num_frames <= 1:
+                    phase = 0.0
+                elif is_cyclic:
+                    phase = i / num_frames
+                else:
+                    phase = i / (num_frames - 1)
+                clip[i, :-1] = base_feat
+                clip[i, -1] = phase
             clips.append(clip)
 
-        # Build cyclic transition pairs per clip, then concatenate
+        # Build transition pairs per clip, then concatenate
         all_transitions = []
         total_frames = 0
-        for clip in clips:
+        for clip, is_cyclic in zip(clips, clip_cyclic):
             total_frames += len(clip)
-            s_tp1 = np.roll(clip, -1, axis=0)  # cyclic: last wraps to first
-            transitions = np.concatenate([clip, s_tp1], axis=-1)
+            if is_cyclic:
+                # Cyclic: last frame wraps to first (N transitions from N frames)
+                s_tp1 = np.roll(clip, -1, axis=0)
+                transitions = np.concatenate([clip, s_tp1], axis=-1)
+            else:
+                # Aperiodic: consecutive pairs only (N-1 transitions from N frames)
+                transitions = np.concatenate(
+                    [clip[:-1], clip[1:]], axis=-1
+                )
             all_transitions.append(transitions)
 
         all_transitions = np.concatenate(all_transitions, axis=0)
@@ -104,6 +127,7 @@ class AMPMotionBuffer:
         for bname in self.body_order:
             feature_names.append(f"{bname}_x")
             feature_names.append(f"{bname}_y")
+        feature_names.append("phase")
 
         print(
             f"AMPMotionBuffer: {total_frames} frames, "
@@ -117,10 +141,11 @@ class AMPMotionBuffer:
                 print(f"  WARNING: dim {i} ({name}) std={std:.6f}")
 
     def _keyframe_to_amp(self, kf):
-        """Convert one keyframe dict to a 35-dim AMP state vector.
+        """Convert one keyframe dict to a 35-dim AMP base state (without phase).
 
         Matches the Brain.cpp observation format:
           [pelvis_y, sin(j0), cos(j0), ..., body0_lx, body0_ly, ...]
+        Phase is appended by the caller.
         """
         feat = []
 

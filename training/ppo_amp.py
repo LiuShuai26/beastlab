@@ -7,7 +7,7 @@
 # Required:
 #   --keyframe-file : path to keyframe JSON (e.g. fight_walk_3.json)
 #
-# Observation layout (from Brain.cpp, 76 elements):
+# Observation layout (from Brain.cpp, 77 elements):
 #   [0]     pelvis_y
 #   [1-2]   sin/cos(pelvis_angle)
 #   [3-5]   pelvis vx, vy, angular_vel
@@ -16,9 +16,10 @@
 #   [42-51] key body positions in pelvis local frame (5 × 2)
 #   [52-63] previous actions (12)
 #   [64-75] energy levels (12)
+#   [76]    phase (clip progress in [0,1])
 #
-# AMP state = obs[0:1] + obs[6:30] + obs[42:52]  →  35 dims
-# Transition = concat(state_t, state_{t+1})       →  70 dims
+# AMP state = obs[0:1] + obs[6:30] + obs[42:52] + obs[76:77]  →  36 dims
+# Transition = concat(state_t, state_{t+1})                    →  72 dims
 
 import atexit
 import os
@@ -82,23 +83,25 @@ BODY_ORDER = [
 AMP_PELVIS_Y = slice(0, 1)  # 1 dim
 AMP_JOINT_SINCOS = slice(6, 30)  # 24 dims
 AMP_BODY_POS = slice(42, 52)  # 10 dims
-AMP_OBS_DIM = 1 + 24 + 10  # 35
+AMP_PHASE = slice(76, 77)  # 1 dim
+AMP_OBS_DIM = 1 + 24 + 10 + 1  # 36
 
 
 def extract_amp_from_raw_obs(raw_obs):
-    """Extract 35-dim AMP state directly from the raw observation vector.
+    """Extract 36-dim AMP state directly from the raw observation vector.
 
     Args:
         raw_obs: numpy array of shape (obs_size,) — unnormalised.
 
     Returns:
-        numpy array of shape (35,).
+        numpy array of shape (36,).
     """
     return np.concatenate(
         [
             raw_obs[AMP_PELVIS_Y],
             raw_obs[AMP_JOINT_SINCOS],
             raw_obs[AMP_BODY_POS],
+            raw_obs[AMP_PHASE],
         ]
     )
 
